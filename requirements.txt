@@ -1,2 +1,5 @@
 streamlit
 boto3
+pandas
+opencv-python-headless
+thefuzz
