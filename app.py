@@ -35,9 +35,7 @@ def change_dir(new_path):
     st.session_state.page = 0
     st.session_state.selected_files = set()
 
-# --- MOTORE S3 (NASCONDE LE CARTELLE TAGSPACES) ---
 def is_valid_s3_item(key, prefix):
-    # Ignora il file stesso e NASCONDE tutte le directory nascoste di TagSpaces (.ts)
     return key != prefix and '/.ts/' not in key and not key.startswith('.ts/')
 
 def get_s3_items(prefix, query, scope):
@@ -52,7 +50,6 @@ def get_s3_items(prefix, query, scope):
                     files.append(c)
     else:
         response = s3.list_objects_v2(Bucket=BUCKET_NAME, Prefix=prefix, Delimiter='/')
-        # Nascondiamo le cartelle .ts visivamente
         folders = [p['Prefix'] for p in response.get('CommonPrefixes', []) if not p['Prefix'].endswith('.ts/')]
         files = [c for c in response.get('Contents', []) if is_valid_s3_item(c['Key'], prefix)]
         
@@ -77,9 +74,7 @@ def create_uncompressed_zip(file_keys):
             zip_file.writestr(os.path.basename(key), file_data)
     return zip_buffer.getvalue()
 
-# --- COMPATIBILITÀ TAGSPACES (.ts) ---
 def get_ts_thumbnail_key(file_key):
-    """Calcola il percorso esatto della miniatura richiesto da TagSpaces (es. cartella/.ts/video.mp4.jpg)"""
     dirname = os.path.dirname(file_key)
     basename = os.path.basename(file_key)
     return f"{dirname}/.ts/{basename}.jpg" if dirname else f".ts/{basename}.jpg"
@@ -96,18 +91,17 @@ def generate_and_upload_thumbnail(file_key):
     video_url = get_presigned_url(file_key)
     try:
         cap = cv2.VideoCapture(video_url)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, 30) # Estrae il fotogramma al 30° istante
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 30)
         ret, frame = cap.read()
         cap.release()
         if ret:
             _, buffer = cv2.imencode('.jpg', frame)
-            # Salva la miniatura nella cartella nascosta .ts
             s3.put_object(Bucket=BUCKET_NAME, Key=thumb_key, Body=io.BytesIO(buffer).getvalue(), ContentType='image/jpeg')
             return True
     except: pass
     return False
 
-# --- INTERFACCIA UTENTE ---
+# --- UI ---
 col1, col2, col3 = st.columns([1, 2, 2])
 with col1:
     if st.button("🏠 Home"): change_dir("")
@@ -119,7 +113,6 @@ with col2:
 with col3:
     st.write(f"**Percorso:** `/{st.session_state.current_path}`")
 
-# --- GENERATORE MASSIVO TAGSPACES ---
 with st.expander("🛠️ Generazione Massiva Anteprime (Compatibile TagSpaces)"):
     st.write("Cerca video privi di anteprima e le genera salvandole nelle cartelle nascoste `.ts`.")
     col_g1, col_g2 = st.columns(2)
@@ -206,6 +199,7 @@ if files:
         start_idx = st.session_state.page * items_per_page
         paginated_files = filtered_files[start_idx : start_idx + items_per_page]
 
+        # --- VISTA GRIGLIA ---
         if view_mode == "🖼️ Griglia (Anteprime)":
             cols = st.columns(4)
             for i, file_obj in enumerate(paginated_files):
@@ -221,16 +215,17 @@ if files:
                         
                         st.caption(f"{(file_obj['Size'] / 1048576):.2f} MB")
                         
-                        if file_name.startswith(".pending") and skip_pending: st.info("🚫 File in lavorazione")
+                        # FIX BUG NAMERROR: L'URL viene generato qui, in modo che esista sempre!
+                        url = get_presigned_url(file_key)
+                        
+                        if file_name.startswith(".pending") and skip_pending: 
+                            st.info("🚫 File in lavorazione")
                         else:
-                            url = get_presigned_url(file_key)
                             ext = file_name.split('.')[-1].lower()
-                            
                             if ext in ['jpg', 'jpeg', 'png', 'gif', 'webp']: 
                                 st.image(url, use_container_width=True)
                             elif ext in ['mp4', 'mov', 'webm', 'avi', 'mkv']: 
                                 thumb_url = get_thumbnail_url(file_key)
-                                # GENERAZIONE AUTOMATICA ISTANTANEA:
                                 if not thumb_url:
                                     with st.spinner("📸 Creazione miniatura..."):
                                         if generate_and_upload_thumbnail(file_key):
@@ -244,16 +239,45 @@ if files:
                                     with st.expander("▶️ Riproduci"): st.video(url)
                             else: st.write("*(Nessuna anteprima)*")
                             
+                        # Ora st.markdown trova sempre la variabile `url` definita
                         st.markdown(f"[⬇️ Scarica Singolo]({url})")
 
+        # --- VISTA LISTA (NUOVA TABELLA INTERATTIVA CON CHECKBOX) ---
         elif view_mode == "📝 Lista (Veloce)":
-            all_keys_on_page = [f['Key'] for f in paginated_files]
-            selected_in_list = st.multiselect("Aggiungi file allo ZIP:", options=all_keys_on_page, default=[k for k in all_keys_on_page if k in st.session_state.selected_files], format_func=lambda x: x if search_scope == "Globale (Cerca in tutto il bucket)" else os.path.basename(x))
-            for key in all_keys_on_page:
-                if key in selected_in_list: st.session_state.selected_files.add(key)
-                else: st.session_state.selected_files.discard(key)
-
-            file_data = [{"Percorso/Nome": f['Key'] if search_scope == "Globale (Cerca in tutto il bucket)" else os.path.basename(f['Key']), "MB": round(f['Size'] / 1048576, 2), "Data": f['LastModified'].strftime("%Y-%m-%d"), "Download": get_presigned_url(f['Key'])} for f in paginated_files]
-            if file_data: st.dataframe(pd.DataFrame(file_data), column_config={"Download": st.column_config.LinkColumn("Link", display_text="⬇️ Scarica")}, hide_index=True, use_container_width=True)
+            file_data = []
+            for f in paginated_files:
+                file_data.append({
+                    "☑️ Seleziona": f['Key'] in st.session_state.selected_files,
+                    "Nome File": f['Key'] if search_scope == "Globale (Cerca in tutto il bucket)" else os.path.basename(f['Key']),
+                    "Dimensione (MB)": round(f['Size'] / 1048576, 2),
+                    "Data Modifica": f['LastModified'].strftime("%Y-%m-%d"),
+                    "Download": get_presigned_url(f['Key']),
+                    "_key_hidden": f['Key'] # Colonna nascosta per ricordare il percorso originale
+                })
+            
+            if file_data:
+                df = pd.DataFrame(file_data)
+                
+                # Editor dati interattivo che permette di cliccare sui checkbox
+                edited_df = st.data_editor(
+                    df,
+                    column_config={
+                        "☑️ Seleziona": st.column_config.CheckboxColumn("☑️ Seleziona", help="Spunta per aggiungere allo ZIP"),
+                        "Download": st.column_config.LinkColumn("Link", display_text="⬇️ Scarica Diretto"),
+                        "_key_hidden": None # Nasconde la colonna di servizio
+                    },
+                    disabled=["Nome File", "Dimensione (MB)", "Data Modifica", "Download"],
+                    hide_index=True, 
+                    use_container_width=True,
+                    key=f"editor_page_{st.session_state.page}" # Evita problemi visivi cambiando pagina
+                )
+                
+                # Applica i cambiamenti dei checkbox allo stato globale per creare lo ZIP
+                for index, row in edited_df.iterrows():
+                    key = row["_key_hidden"]
+                    if row["☑️ Seleziona"]:
+                        st.session_state.selected_files.add(key)
+                    else:
+                        st.session_state.selected_files.discard(key)
 
 if not folders and not files: st.info("Nessun contenuto in questa cartella.")
