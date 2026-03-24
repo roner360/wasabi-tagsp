@@ -42,18 +42,27 @@ def is_valid_s3_item(key, prefix):
 def get_s3_items(prefix, query, scope):
     folders = []
     files = []
+    
+    # Inizializziamo il Paginator per aggirare il "Muro dei 1000" di S3
+    paginator = s3.get_paginator('list_objects_v2')
+    
     if query and scope == "Globale (Cerca in tutto il bucket)":
-        paginator = s3.get_paginator('list_objects_v2')
         pages = paginator.paginate(Bucket=BUCKET_NAME, Prefix=prefix)
         for page in pages:
             for c in page.get('Contents', []):
                 if not c['Key'].endswith('/') and is_valid_s3_item(c['Key'], prefix):
                     files.append(c)
     else:
-        response = s3.list_objects_v2(Bucket=BUCKET_NAME, Prefix=prefix, Delimiter='/')
-        folders = [p['Prefix'] for p in response.get('CommonPrefixes', []) if not p['Prefix'].endswith('.ts/')]
-        files = [c for c in response.get('Contents', []) if is_valid_s3_item(c['Key'], prefix)]
-        
+        # Paginazione applicata anche alla cartella locale (FONDAMENTALE!)
+        pages = paginator.paginate(Bucket=BUCKET_NAME, Prefix=prefix, Delimiter='/')
+        for page in pages:
+            for p in page.get('CommonPrefixes', []):
+                if not p['Prefix'].endswith('.ts/'):
+                    folders.append(p['Prefix'])
+            for c in page.get('Contents', []):
+                if is_valid_s3_item(c['Key'], prefix):
+                    files.append(c)
+                    
     return folders, files
 
 def is_match(filename, query, mode):
