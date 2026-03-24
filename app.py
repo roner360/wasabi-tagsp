@@ -22,7 +22,6 @@ def get_s3_client():
 
 s3 = get_s3_client()
 BUCKET_NAME = st.secrets["wasabi"]["BUCKET_NAME"]
-ITEMS_PER_PAGE = 24 # Numero di file per pagina
 
 # --- GESTIONE STATO ---
 if "current_path" not in st.session_state: st.session_state.current_path = ""
@@ -31,7 +30,7 @@ if "selected_files" not in st.session_state: st.session_state.selected_files = s
 
 def change_dir(new_path):
     st.session_state.current_path = new_path
-    st.session_state.page = 0 # Resetta la pagina al cambio cartella
+    st.session_state.page = 0 # Resetta la pagina
     st.session_state.selected_files = set() # Resetta la selezione
 
 def list_s3_objects(prefix):
@@ -49,7 +48,6 @@ def get_presigned_url(file_key, expires_in=3600):
         return None
 
 def create_uncompressed_zip(file_keys):
-    """Crea uno zip in memoria con compressione ZERO (ZIP_STORED) per massima velocità"""
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_STORED) as zip_file:
         for key in file_keys:
@@ -59,7 +57,7 @@ def create_uncompressed_zip(file_keys):
             zip_file.writestr(filename, file_data)
     return zip_buffer.getvalue()
 
-# --- BARRA DEGLI STRUMENTI ---
+# --- BARRA DI NAVIGAZIONE ---
 col1, col2, col3 = st.columns([1, 2, 2])
 with col1:
     if st.button("🏠 Home"): change_dir("")
@@ -70,13 +68,18 @@ with col3:
 
 st.divider()
 
-col_v, col_s, col_opt = st.columns([2, 1, 1])
+# --- OPZIONI DI VISUALIZZAZIONE E PAGINAZIONE ---
+col_v, col_s, col_opt, col_pag = st.columns([2, 1, 1, 1])
 with col_v:
     view_mode = st.radio("Modalità:", ["🖼️ Griglia (Anteprime)", "📝 Lista (Veloce)"], horizontal=True)
 with col_s:
     sort_mode = st.selectbox("Ordina per:", ["Nome (A-Z)", "Nome (Z-A)", "Più recenti", "Dimensione"])
 with col_opt:
-    skip_pending = st.checkbox("🚫 Ignora anteprime per file '.pending'", value=True)
+    st.write("") # Spazio per allineare verticalmente il checkbox
+    skip_pending = st.checkbox("🚫 Ignora '.pending'", value=True)
+with col_pag:
+    # --- NUOVO: SELETTORE FILE PER PAGINA (Default: 10) ---
+    items_per_page = st.selectbox("File per pagina:", [10, 25, 50, 100], index=0)
 
 st.divider()
 
@@ -84,7 +87,7 @@ st.divider()
 with st.spinner("Caricamento..."):
     folders, files = list_s3_objects(st.session_state.current_path)
 
-# CARTELLE
+# MOSTRA CARTELLE
 if folders:
     st.subheader("📁 Cartelle")
     cols = st.columns(4)
@@ -96,7 +99,7 @@ if folders:
                 change_dir(folder)
                 st.rerun()
 
-# FILE
+# MOSTRA FILE
 if files:
     st.subheader("📄 File")
     
@@ -110,16 +113,21 @@ if files:
     # --- DOWNLOAD MULTIPLO (ZIP) ---
     if st.session_state.selected_files:
         st.success(f"Hai selezionato {len(st.session_state.selected_files)} file.")
-        if st.button("📦 Scarica Selezionati (ZIP Veloce)"):
-            with st.spinner("Creazione ZIP in corso (nessuna compressione)..."):
+        if st.button("📦 Scarica Selezionati (ZIP a Compressione Zero)"):
+            with st.spinner("Creazione ZIP in corso..."):
                 zip_data = create_uncompressed_zip(st.session_state.selected_files)
                 st.download_button("⬇️ Clicca qui per salvare lo ZIP", data=zip_data, file_name="wasabi_download.zip", mime="application/zip")
 
-    # --- PAGINAZIONE ---
+    # --- LOGICA PAGINAZIONE DINAMICA ---
     total_files = len(filtered_files)
-    total_pages = math.ceil(total_files / ITEMS_PER_PAGE)
+    total_pages = math.ceil(total_files / items_per_page) if total_files > 0 else 1
     
-    if total_pages > 1:
+    # Previene errori se cambi da 10 a 50 e ti trovi in una pagina che non esiste più
+    if st.session_state.page >= total_pages:
+        st.session_state.page = max(0, total_pages - 1)
+    
+    # Mostra i bottoni di paginazione solo se i file superano il limite per pagina
+    if total_files > items_per_page:
         pag_col1, pag_col2, pag_col3 = st.columns([1, 2, 1])
         with pag_col1:
             if st.button("⬅️ Precedente", disabled=(st.session_state.page == 0)):
@@ -133,11 +141,11 @@ if files:
                 st.rerun()
 
     # Estrai solo i file della pagina corrente
-    start_idx = st.session_state.page * ITEMS_PER_PAGE
-    end_idx = start_idx + ITEMS_PER_PAGE
+    start_idx = st.session_state.page * items_per_page
+    end_idx = start_idx + items_per_page
     paginated_files = filtered_files[start_idx:end_idx]
 
-    # --- MOSTRA VISTA ---
+    # --- VISTA GRIGLIA ---
     if view_mode == "🖼️ Griglia (Anteprime)":
         cols = st.columns(4)
         for i, file_obj in enumerate(paginated_files):
@@ -147,7 +155,6 @@ if files:
             
             with cols[i % 4]:
                 with st.container(border=True):
-                    # Checkbox per selezione multipla
                     is_selected = file_key in st.session_state.selected_files
                     if st.checkbox(f"{file_name}", value=is_selected, key=f"chk_{file_key}"):
                         st.session_state.selected_files.add(file_key)
@@ -156,9 +163,8 @@ if files:
                     
                     st.caption(f"{(file_obj['Size'] / 1048576):.2f} MB")
                     
-                    # Gestione Anteprima (saltala se è pending e l'opzione è attiva)
                     if is_pending and skip_pending:
-                        st.info("🚫 Anteprima file pending disabilitata")
+                        st.info("🚫 File in lavorazione")
                     else:
                         url = get_presigned_url(file_key)
                         ext = file_name.split('.')[-1].lower()
@@ -168,17 +174,16 @@ if files:
                         
                     st.markdown(f"[⬇️ Scarica Singolo]({get_presigned_url(file_key)})")
 
+    # --- VISTA LISTA ---
     elif view_mode == "📝 Lista (Veloce)":
-        # Creiamo un selettore multiplo più pulito per la vista lista
         all_keys_on_page = [f['Key'] for f in paginated_files]
         selected_in_list = st.multiselect(
-            "Seleziona i file da aggiungere allo ZIP:",
+            "Seleziona i file da aggiungere allo ZIP (nella pagina corrente):",
             options=all_keys_on_page,
             default=[k for k in all_keys_on_page if k in st.session_state.selected_files],
             format_func=lambda x: os.path.basename(x)
         )
         
-        # Aggiorna lo stato globale con la selezione della lista
         for key in all_keys_on_page:
             if key in selected_in_list: st.session_state.selected_files.add(key)
             else: st.session_state.selected_files.discard(key)
@@ -197,7 +202,7 @@ if files:
         if file_data:
             st.dataframe(
                 pd.DataFrame(file_data),
-                column_config={"Download": st.column_config.LinkColumn("Link", display_text="⬇️ Link Diretto")},
+                column_config={"Download": st.column_config.LinkColumn("Link", display_text="⬇️ Scarica")},
                 hide_index=True, use_container_width=True
             )
 
