@@ -35,6 +35,7 @@ def change_dir(new_path):
     st.session_state.page = 0
     st.session_state.selected_files = set()
 
+# Nascondiamo forzatamente le cartelle strutturali di TagSpaces per non romperle
 def is_valid_s3_item(key, prefix):
     return key != prefix and '/.ts/' not in key and not key.startswith('.ts/')
 
@@ -101,7 +102,7 @@ def generate_and_upload_thumbnail(file_key):
     except: pass
     return False
 
-# --- UI ---
+# --- UI BARRA SUPERIORE ---
 col1, col2, col3 = st.columns([1, 2, 2])
 with col1:
     if st.button("🏠 Home"): change_dir("")
@@ -112,6 +113,16 @@ with col2:
         search_mode = st.radio("Metodo:", ["🧠 Smart (Parole libere)", "✨ Fuzzy (Tollera errori)", "📏 Esatta"], horizontal=True)
 with col3:
     st.write(f"**Percorso:** `/{st.session_state.current_path}`")
+
+# --- UI OPZIONI DI VISUALIZZAZIONE ---
+with st.expander("👁️ Impostazioni Visualizzazione", expanded=False):
+    c_v1, c_v2, c_v3 = st.columns(3)
+    with c_v1:
+        folder_view_mode = st.radio("Vista Cartelle:", ["📁 Griglia (Affiancate)", "📝 Lista Compatta (Verticale)"], horizontal=True)
+    with c_v2:
+        hide_dot_files = st.checkbox("🚫 Nascondi file/cartelle nascoste (es. '.pending')", value=True, help="Nasconde tutti gli elementi che iniziano con un punto.")
+    with c_v3:
+        thumb_size = st.selectbox("Dimensione Miniature (Griglia):", ["Molto Grande", "Grande", "Media (Default)", "Piccola", "Piccolissima"], index=2)
 
 with st.expander("🛠️ Generazione Massiva Anteprime (Compatibile TagSpaces)"):
     st.write("Cerca video privi di anteprima e le genera salvandole nelle cartelle nascoste `.ts`.")
@@ -144,10 +155,9 @@ if st.session_state.batch_gen:
 
 st.divider()
 
-col_v, col_s, col_opt, col_pag = st.columns([2, 1, 1, 1])
-with col_v: view_mode = st.radio("Modalità:", ["🖼️ Griglia (Anteprime)", "📝 Lista (Veloce)"], horizontal=True)
-with col_s: sort_mode = st.selectbox("Ordina per:", ["Nome (A-Z)", "Nome (Z-A)", "Più recenti", "Dimensione"])
-with col_opt: skip_pending = st.checkbox("🚫 Ignora '.pending'", value=True)
+col_v, col_s, col_pag = st.columns([2, 1, 1])
+with col_v: view_mode = st.radio("Modalità File:", ["🖼️ Griglia (Anteprime)", "📝 Lista (Veloce)"], horizontal=True)
+with col_s: sort_mode = st.selectbox("Ordina File per:", ["Nome (A-Z)", "Nome (Z-A)", "Più recenti", "Dimensione"])
 with col_pag: items_per_page = st.selectbox("File per pagina:", [10, 25, 50, 100], index=0)
 
 st.divider()
@@ -155,20 +165,46 @@ st.divider()
 with st.spinner("Caricamento..."):
     folders, files = get_s3_items(st.session_state.current_path, search_query, search_scope)
 
+# --- FILTRO CARTELLE ---
 if folders and search_scope == "Locale (Solo questa cartella)":
     st.subheader("📁 Cartelle")
-    cols = st.columns(4)
-    filtered_folders = [f for f in folders if is_match(os.path.basename(f.strip('/')), search_query, search_mode)]
-    for i, folder in enumerate(filtered_folders):
-        folder_name = folder.replace(st.session_state.current_path, "").strip("/")
-        with cols[i % 4]:
+    
+    # Applica filtro '.punto' e filtro ricerca
+    filtered_folders = []
+    for f in folders:
+        f_name = os.path.basename(f.strip('/'))
+        if hide_dot_files and f_name.startswith('.'): continue
+        if is_match(f_name, search_query, search_mode):
+            filtered_folders.append(f)
+
+    # Rendering Cartelle (Griglia o Lista)
+    if folder_view_mode == "📁 Griglia (Affiancate)":
+        cols = st.columns(4)
+        for i, folder in enumerate(filtered_folders):
+            folder_name = folder.replace(st.session_state.current_path, "").strip("/")
+            with cols[i % 4]:
+                if st.button(f"📂 {folder_name}", key=folder, use_container_width=True):
+                    change_dir(folder)
+                    st.rerun()
+    else:
+        # Lista Compatta
+        for folder in filtered_folders:
+            folder_name = folder.replace(st.session_state.current_path, "").strip("/")
             if st.button(f"📂 {folder_name}", key=folder):
                 change_dir(folder)
                 st.rerun()
 
+# --- FILTRO FILE ---
 if files:
     st.subheader("📄 File")
-    filtered_files = [f for f in files if is_match(os.path.basename(f['Key']), search_query, search_mode)]
+    
+    # Applica filtro '.punto' e filtro ricerca
+    filtered_files = []
+    for f in files:
+        f_name = os.path.basename(f['Key'])
+        if hide_dot_files and f_name.startswith('.'): continue
+        if is_match(f_name, search_query, search_mode):
+            filtered_files.append(f)
     
     if sort_mode == "Nome (A-Z)": filtered_files.sort(key=lambda x: os.path.basename(x['Key']).lower())
     elif sort_mode == "Nome (Z-A)": filtered_files.sort(key=lambda x: os.path.basename(x['Key']).lower(), reverse=True)
@@ -199,50 +235,54 @@ if files:
         start_idx = st.session_state.page * items_per_page
         paginated_files = filtered_files[start_idx : start_idx + items_per_page]
 
-        # --- VISTA GRIGLIA ---
+        # --- VISTA GRIGLIA FILE ---
         if view_mode == "🖼️ Griglia (Anteprime)":
-            cols = st.columns(4)
+            
+            # Mappatura della dimensione desiderata nel numero di colonne di Streamlit
+            col_count_map = {"Molto Grande": 2, "Grande": 3, "Media (Default)": 4, "Piccola": 6, "Piccolissima": 8}
+            num_cols = col_count_map[thumb_size]
+            
+            cols = st.columns(num_cols)
             for i, file_obj in enumerate(paginated_files):
                 file_key = file_obj['Key']
                 file_name = os.path.basename(file_key)
                 
-                with cols[i % 4]:
+                with cols[i % num_cols]:
                     with st.container(border=True):
                         display_name = f"📂 {os.path.dirname(file_key)}/\n{file_name}" if search_scope == "Globale (Cerca in tutto il bucket)" else file_name
+                        
+                        # Troncamento testo per non far impazzire l'interfaccia sulle miniature piccolissime
+                        if thumb_size in ["Piccola", "Piccolissima"] and len(display_name) > 25:
+                            display_name = display_name[:22] + "..."
+                            
                         is_selected = file_key in st.session_state.selected_files
                         if st.checkbox(f"{display_name}", value=is_selected, key=f"chk_{file_key}"): st.session_state.selected_files.add(file_key)
                         else: st.session_state.selected_files.discard(file_key)
                         
                         st.caption(f"{(file_obj['Size'] / 1048576):.2f} MB")
                         
-                        # FIX BUG NAMERROR: L'URL viene generato qui, in modo che esista sempre!
                         url = get_presigned_url(file_key)
-                        
-                        if file_name.startswith(".pending") and skip_pending: 
-                            st.info("🚫 File in lavorazione")
-                        else:
-                            ext = file_name.split('.')[-1].lower()
-                            if ext in ['jpg', 'jpeg', 'png', 'gif', 'webp']: 
-                                st.image(url, use_container_width=True)
-                            elif ext in ['mp4', 'mov', 'webm', 'avi', 'mkv']: 
-                                thumb_url = get_thumbnail_url(file_key)
-                                if not thumb_url:
-                                    with st.spinner("📸 Creazione miniatura..."):
-                                        if generate_and_upload_thumbnail(file_key):
-                                            thumb_url = get_presigned_url(get_ts_thumbnail_key(file_key))
-                                
-                                if thumb_url:
-                                    st.image(thumb_url, use_container_width=True)
-                                    with st.expander("▶️ Riproduci"): st.video(url)
-                                else:
-                                    st.warning("Impossibile generare anteprima.")
-                                    with st.expander("▶️ Riproduci"): st.video(url)
-                            else: st.write("*(Nessuna anteprima)*")
+                        ext = file_name.split('.')[-1].lower()
+                        if ext in ['jpg', 'jpeg', 'png', 'gif', 'webp']: 
+                            st.image(url, use_container_width=True)
+                        elif ext in ['mp4', 'mov', 'webm', 'avi', 'mkv']: 
+                            thumb_url = get_thumbnail_url(file_key)
+                            if not thumb_url:
+                                with st.spinner("📸 Creazione..."):
+                                    if generate_and_upload_thumbnail(file_key):
+                                        thumb_url = get_presigned_url(get_ts_thumbnail_key(file_key))
                             
-                        # Ora st.markdown trova sempre la variabile `url` definita
+                            if thumb_url:
+                                st.image(thumb_url, use_container_width=True)
+                                with st.expander("▶️ Play"): st.video(url)
+                            else:
+                                st.warning("Anteprima Fallita.")
+                                with st.expander("▶️ Play"): st.video(url)
+                        else: st.write("*(Nessuna anteprima)*")
+                            
                         st.markdown(f"[⬇️ Scarica Singolo]({url})")
 
-        # --- VISTA LISTA (NUOVA TABELLA INTERATTIVA CON CHECKBOX) ---
+        # --- VISTA LISTA FILE ---
         elif view_mode == "📝 Lista (Veloce)":
             file_data = []
             for f in paginated_files:
@@ -252,32 +292,27 @@ if files:
                     "Dimensione (MB)": round(f['Size'] / 1048576, 2),
                     "Data Modifica": f['LastModified'].strftime("%Y-%m-%d"),
                     "Download": get_presigned_url(f['Key']),
-                    "_key_hidden": f['Key'] # Colonna nascosta per ricordare il percorso originale
+                    "_key_hidden": f['Key']
                 })
             
             if file_data:
                 df = pd.DataFrame(file_data)
-                
-                # Editor dati interattivo che permette di cliccare sui checkbox
                 edited_df = st.data_editor(
                     df,
                     column_config={
-                        "☑️ Seleziona": st.column_config.CheckboxColumn("☑️ Seleziona", help="Spunta per aggiungere allo ZIP"),
-                        "Download": st.column_config.LinkColumn("Link", display_text="⬇️ Scarica Diretto"),
-                        "_key_hidden": None # Nasconde la colonna di servizio
+                        "☑️ Seleziona": st.column_config.CheckboxColumn("☑️ Seleziona"),
+                        "Download": st.column_config.LinkColumn("Link", display_text="⬇️ Scarica"),
+                        "_key_hidden": None 
                     },
                     disabled=["Nome File", "Dimensione (MB)", "Data Modifica", "Download"],
                     hide_index=True, 
                     use_container_width=True,
-                    key=f"editor_page_{st.session_state.page}" # Evita problemi visivi cambiando pagina
+                    key=f"editor_page_{st.session_state.page}"
                 )
                 
-                # Applica i cambiamenti dei checkbox allo stato globale per creare lo ZIP
                 for index, row in edited_df.iterrows():
                     key = row["_key_hidden"]
-                    if row["☑️ Seleziona"]:
-                        st.session_state.selected_files.add(key)
-                    else:
-                        st.session_state.selected_files.discard(key)
+                    if row["☑️ Seleziona"]: st.session_state.selected_files.add(key)
+                    else: st.session_state.selected_files.discard(key)
 
 if not folders and not files: st.info("Nessun contenuto in questa cartella.")
