@@ -2,6 +2,9 @@ import streamlit as st
 import boto3
 import os
 import pandas as pd
+import math
+import io
+import zipfile
 from botocore.exceptions import ClientError
 
 st.set_page_config(page_title="Wasabi Cloud Explorer", layout="wide")
@@ -19,12 +22,17 @@ def get_s3_client():
 
 s3 = get_s3_client()
 BUCKET_NAME = st.secrets["wasabi"]["BUCKET_NAME"]
+ITEMS_PER_PAGE = 24 # Numero di file per pagina
 
-if "current_path" not in st.session_state:
-    st.session_state.current_path = ""
+# --- GESTIONE STATO ---
+if "current_path" not in st.session_state: st.session_state.current_path = ""
+if "page" not in st.session_state: st.session_state.page = 0
+if "selected_files" not in st.session_state: st.session_state.selected_files = set()
 
 def change_dir(new_path):
     st.session_state.current_path = new_path
+    st.session_state.page = 0 # Resetta la pagina al cambio cartella
+    st.session_state.selected_files = set() # Resetta la selezione
 
 def list_s3_objects(prefix):
     response = s3.list_objects_v2(Bucket=BUCKET_NAME, Prefix=prefix, Delimiter='/')
@@ -37,14 +45,24 @@ def get_presigned_url(file_key, expires_in=3600):
         return s3.generate_presigned_url('get_object',
                                         Params={'Bucket': BUCKET_NAME, 'Key': file_key},
                                         ExpiresIn=expires_in)
-    except ClientError as e:
+    except ClientError:
         return None
 
-# --- BARRA DEGLI STRUMENTI (NAVIGAZIONE, RICERCA, VISTA, ORDINAMENTO) ---
+def create_uncompressed_zip(file_keys):
+    """Crea uno zip in memoria con compressione ZERO (ZIP_STORED) per massima velocità"""
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_STORED) as zip_file:
+        for key in file_keys:
+            response = s3.get_object(Bucket=BUCKET_NAME, Key=key)
+            file_data = response['Body'].read()
+            filename = os.path.basename(key)
+            zip_file.writestr(filename, file_data)
+    return zip_buffer.getvalue()
+
+# --- BARRA DEGLI STRUMENTI ---
 col1, col2, col3 = st.columns([1, 2, 2])
 with col1:
-    if st.button("🏠 Home (Radice)"):
-        change_dir("")
+    if st.button("🏠 Home"): change_dir("")
 with col2:
     search_query = st.text_input("🔍 Cerca...", "")
 with col3:
@@ -52,25 +70,25 @@ with col3:
 
 st.divider()
 
-col_view, col_sort = st.columns(2)
-with col_view:
-    view_mode = st.radio("Modalità di visualizzazione:", ["📝 Lista (Veloce)", "🖼️ Griglia (Anteprime)"], horizontal=True)
-with col_sort:
-    sort_mode = st.selectbox("Ordina file per:", ["Nome (A-Z)", "Nome (Z-A)", "Più recenti", "Dimensione (Maggiore-Minore)"])
+col_v, col_s, col_opt = st.columns([2, 1, 1])
+with col_v:
+    view_mode = st.radio("Modalità:", ["🖼️ Griglia (Anteprime)", "📝 Lista (Veloce)"], horizontal=True)
+with col_s:
+    sort_mode = st.selectbox("Ordina per:", ["Nome (A-Z)", "Nome (Z-A)", "Più recenti", "Dimensione"])
+with col_opt:
+    skip_pending = st.checkbox("🚫 Ignora anteprime per file '.pending'", value=True)
 
 st.divider()
 
-# --- RECUPERO CONTENUTI ---
-with st.spinner("Caricamento in corso..."):
+# --- RECUPERO E FILTRAGGIO ---
+with st.spinner("Caricamento..."):
     folders, files = list_s3_objects(st.session_state.current_path)
 
-# --- MOSTRA CARTELLE ---
+# CARTELLE
 if folders:
     st.subheader("📁 Cartelle")
     cols = st.columns(4)
-    # Filtro ricerca per cartelle
-    filtered_folders = [f for f in folders if search_query.lower() in f.lower() or search_query == ""]
-    
+    filtered_folders = [f for f in folders if search_query.lower() in f.lower()]
     for i, folder in enumerate(filtered_folders):
         folder_name = folder.replace(st.session_state.current_path, "").strip("/")
         with cols[i % 4]:
@@ -78,76 +96,110 @@ if folders:
                 change_dir(folder)
                 st.rerun()
 
-# --- ORDINAMENTO E FILTRAGGIO FILE ---
+# FILE
 if files:
     st.subheader("📄 File")
     
-    # 1. Filtro Ricerca
-    filtered_files = [f for f in files if search_query.lower() in os.path.basename(f['Key']).lower() or search_query == ""]
+    # Filtraggio e Ordinamento
+    filtered_files = [f for f in files if search_query.lower() in os.path.basename(f['Key']).lower()]
+    if sort_mode == "Nome (A-Z)": filtered_files.sort(key=lambda x: os.path.basename(x['Key']).lower())
+    elif sort_mode == "Nome (Z-A)": filtered_files.sort(key=lambda x: os.path.basename(x['Key']).lower(), reverse=True)
+    elif sort_mode == "Più recenti": filtered_files.sort(key=lambda x: x['LastModified'], reverse=True)
+    elif sort_mode == "Dimensione": filtered_files.sort(key=lambda x: x['Size'], reverse=True)
+
+    # --- DOWNLOAD MULTIPLO (ZIP) ---
+    if st.session_state.selected_files:
+        st.success(f"Hai selezionato {len(st.session_state.selected_files)} file.")
+        if st.button("📦 Scarica Selezionati (ZIP Veloce)"):
+            with st.spinner("Creazione ZIP in corso (nessuna compressione)..."):
+                zip_data = create_uncompressed_zip(st.session_state.selected_files)
+                st.download_button("⬇️ Clicca qui per salvare lo ZIP", data=zip_data, file_name="wasabi_download.zip", mime="application/zip")
+
+    # --- PAGINAZIONE ---
+    total_files = len(filtered_files)
+    total_pages = math.ceil(total_files / ITEMS_PER_PAGE)
     
-    # 2. Ordinamento
-    if sort_mode == "Nome (A-Z)":
-        filtered_files = sorted(filtered_files, key=lambda x: os.path.basename(x['Key']).lower())
-    elif sort_mode == "Nome (Z-A)":
-        filtered_files = sorted(filtered_files, key=lambda x: os.path.basename(x['Key']).lower(), reverse=True)
-    elif sort_mode == "Più recenti":
-        filtered_files = sorted(filtered_files, key=lambda x: x['LastModified'], reverse=True)
-    elif sort_mode == "Dimensione (Maggiore-Minore)":
-        filtered_files = sorted(filtered_files, key=lambda x: x['Size'], reverse=True)
+    if total_pages > 1:
+        pag_col1, pag_col2, pag_col3 = st.columns([1, 2, 1])
+        with pag_col1:
+            if st.button("⬅️ Precedente", disabled=(st.session_state.page == 0)):
+                st.session_state.page -= 1
+                st.rerun()
+        with pag_col2:
+            st.markdown(f"<div style='text-align: center'>Pagina <b>{st.session_state.page + 1}</b> di {total_pages} ({total_files} file totali)</div>", unsafe_allow_html=True)
+        with pag_col3:
+            if st.button("Avanti ➡️", disabled=(st.session_state.page >= total_pages - 1)):
+                st.session_state.page += 1
+                st.rerun()
 
-    if not filtered_files:
-        st.warning("Nessun file corrisponde alla tua ricerca.")
-    else:
-        # --- VISTA LISTA (TABELLA PANDAS) ---
-        if view_mode == "📝 Lista (Veloce)":
-            file_data = []
-            for file_obj in filtered_files:
-                file_key = file_obj['Key']
-                file_name = os.path.basename(file_key)
-                file_data.append({
-                    "Nome File": file_name,
-                    "Dimensione (MB)": round(file_obj['Size'] / (1024 * 1024), 2),
-                    "Ultima Modifica": file_obj['LastModified'].strftime("%Y-%m-%d %H:%M"),
-                    "Download": get_presigned_url(file_key)
-                })
+    # Estrai solo i file della pagina corrente
+    start_idx = st.session_state.page * ITEMS_PER_PAGE
+    end_idx = start_idx + ITEMS_PER_PAGE
+    paginated_files = filtered_files[start_idx:end_idx]
+
+    # --- MOSTRA VISTA ---
+    if view_mode == "🖼️ Griglia (Anteprime)":
+        cols = st.columns(4)
+        for i, file_obj in enumerate(paginated_files):
+            file_key = file_obj['Key']
+            file_name = os.path.basename(file_key)
+            is_pending = file_name.startswith(".pending")
             
-            df = pd.DataFrame(file_data)
-            st.dataframe(
-                df,
-                column_config={
-                    "Nome File": st.column_config.TextColumn("Nome File"),
-                    "Dimensione (MB)": st.column_config.NumberColumn("MB", format="%.2f"),
-                    "Ultima Modifica": st.column_config.DatetimeColumn("Modificato il"),
-                    "Download": st.column_config.LinkColumn("Link", display_text="⬇️ Scarica / Apri")
-                },
-                hide_index=True,
-                use_container_width=True
-            )
-
-        # --- VISTA GRIGLIA (ANTEPRIME) ---
-        elif view_mode == "🖼️ Griglia (Anteprime)":
-            cols = st.columns(3) # Cambia a 4 o 5 se vuoi miniature più piccole
-            for i, file_obj in enumerate(filtered_files):
-                file_key = file_obj['Key']
-                file_name = os.path.basename(file_key)
-                file_size_mb = file_obj['Size'] / (1024 * 1024)
-                
-                with cols[i % 3]:
-                    with st.container(border=True):
-                        st.write(f"**{file_name}**")
-                        st.caption(f"{file_size_mb:.2f} MB")
-                        
+            with cols[i % 4]:
+                with st.container(border=True):
+                    # Checkbox per selezione multipla
+                    is_selected = file_key in st.session_state.selected_files
+                    if st.checkbox(f"{file_name}", value=is_selected, key=f"chk_{file_key}"):
+                        st.session_state.selected_files.add(file_key)
+                    else:
+                        st.session_state.selected_files.discard(file_key)
+                    
+                    st.caption(f"{(file_obj['Size'] / 1048576):.2f} MB")
+                    
+                    # Gestione Anteprima (saltala se è pending e l'opzione è attiva)
+                    if is_pending and skip_pending:
+                        st.info("🚫 Anteprima file pending disabilitata")
+                    else:
                         url = get_presigned_url(file_key)
                         ext = file_name.split('.')[-1].lower()
+                        if ext in ['jpg', 'jpeg', 'png', 'gif', 'webp']: st.image(url, use_container_width=True)
+                        elif ext in ['mp4', 'mov', 'webm']: st.video(url)
+                        else: st.write("*(Nessuna anteprima)*")
                         
-                        if ext in ['jpg', 'jpeg', 'png', 'gif', 'webp']:
-                            st.image(url, use_container_width=True)
-                        elif ext in ['mp4', 'mov', 'webm']:
-                            st.video(url)
-                        else:
-                            st.info("Anteprima non disponibile")
-                            
-                        st.markdown(f"[⬇️ Scarica File]({url})")
+                    st.markdown(f"[⬇️ Scarica Singolo]({get_presigned_url(file_key)})")
+
+    elif view_mode == "📝 Lista (Veloce)":
+        # Creiamo un selettore multiplo più pulito per la vista lista
+        all_keys_on_page = [f['Key'] for f in paginated_files]
+        selected_in_list = st.multiselect(
+            "Seleziona i file da aggiungere allo ZIP:",
+            options=all_keys_on_page,
+            default=[k for k in all_keys_on_page if k in st.session_state.selected_files],
+            format_func=lambda x: os.path.basename(x)
+        )
+        
+        # Aggiorna lo stato globale con la selezione della lista
+        for key in all_keys_on_page:
+            if key in selected_in_list: st.session_state.selected_files.add(key)
+            else: st.session_state.selected_files.discard(key)
+
+        file_data = []
+        for file_obj in paginated_files:
+            file_key = file_obj['Key']
+            file_name = os.path.basename(file_key)
+            file_data.append({
+                "Nome File": file_name,
+                "Dimensione (MB)": round(file_obj['Size'] / 1048576, 2),
+                "Ultima Modifica": file_obj['LastModified'].strftime("%Y-%m-%d %H:%M"),
+                "Download": get_presigned_url(file_key)
+            })
+        
+        if file_data:
+            st.dataframe(
+                pd.DataFrame(file_data),
+                column_config={"Download": st.column_config.LinkColumn("Link", display_text="⬇️ Link Diretto")},
+                hide_index=True, use_container_width=True
+            )
 
 if not folders and not files:
     st.info("La cartella è vuota.")
