@@ -6,11 +6,47 @@ import math
 import io
 import zipfile
 import cv2
+import json
 from thefuzz import fuzz
 from botocore.exceptions import ClientError
 
 st.set_page_config(page_title="Wasabi Cloud Explorer", layout="wide")
 st.title("🗂️ Wasabi Cloud Explorer")
+
+# --- GESTIONE IMPOSTAZIONI (JSON) ---
+SETTINGS_FILE = "settings.json"
+
+def load_settings():
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, "r") as f:
+                return json.load(f)
+        except: pass
+    return {
+        "folder_view": "📁 Griglia (Affiancate)",
+        "hide_dot": True,
+        "tsize": "Media (Default)",
+        "vmode": "🖼️ Griglia (Anteprime)",
+        "smode": "Nome (A-Z)",
+        "ipp": 25
+    }
+
+def save_settings():
+    settings = {
+        "folder_view": st.session_state.folder_view,
+        "hide_dot": st.session_state.hide_dot,
+        "tsize": st.session_state.tsize,
+        "vmode": st.session_state.vmode,
+        "smode": st.session_state.smode,
+        "ipp": st.session_state.ipp
+    }
+    with open(SETTINGS_FILE, "w") as f:
+        json.dump(settings, f)
+
+# Inizializza le impostazioni nello stato di Streamlit
+if "settings_loaded" not in st.session_state:
+    st.session_state.update(load_settings())
+    st.session_state.settings_loaded = True
 
 @st.cache_resource
 def get_s3_client():
@@ -122,9 +158,12 @@ with col3:
 # --- UI OPZIONI DI VISUALIZZAZIONE ---
 with st.expander("👁️ Impostazioni Visualizzazione", expanded=False):
     c_v1, c_v2, c_v3 = st.columns(3)
-    with c_v1: folder_view_mode = st.radio("Vista Cartelle:", ["📁 Griglia (Affiancate)", "📝 Lista Compatta (Verticale)"], horizontal=True)
-    with c_v2: hide_dot_files = st.checkbox("🚫 Nascondi file/cartelle nascoste (es. '.pending')", value=True)
-    with c_v3: thumb_size = st.selectbox("Dimensione Miniature:", ["Molto Grande", "Grande", "Media (Default)", "Piccola", "Piccolissima"], index=2)
+    with c_v1: 
+        st.radio("Vista Cartelle:", ["📁 Griglia (Affiancate)", "📝 Lista Compatta (Verticale)"], horizontal=True, key="folder_view", on_change=save_settings)
+    with c_v2: 
+        st.checkbox("🚫 Nascondi file/cartelle nascoste (es. '.pending')", key="hide_dot", on_change=save_settings)
+    with c_v3: 
+        st.selectbox("Dimensione Miniature:", ["Molto Grande", "Grande", "Media (Default)", "Piccola", "Piccolissima"], key="tsize", on_change=save_settings)
 
 with st.expander("🛠️ Generazione Massiva Anteprime (Compatibile TagSpaces)"):
     st.write("Cerca video privi di anteprima e le genera salvandole nelle cartelle nascoste `.ts`.")
@@ -139,7 +178,6 @@ if st.session_state.batch_gen:
     st.session_state.batch_gen = None
     with st.spinner("Scansione database in corso..."):
         _, files_to_check = get_s3_items("" if mode == "global" else st.session_state.current_path, "", "Globale (Cerca in tutto il bucket)" if mode == "global" else "Locale")
-        # FIX: Include anche i file senza estensione (senza punto nel nome) che prima venivano scartati!
         videos = [f['Key'] for f in files_to_check if f['Key'].lower().endswith(('.mp4', '.mov', '.webm', '.avi', '.mkv')) or '.' not in os.path.basename(f['Key'])]
     
     if not videos: st.info("Nessun video trovato.")
@@ -159,9 +197,9 @@ if st.session_state.batch_gen:
 st.divider()
 
 col_v, col_s, col_pag = st.columns([2, 1, 1])
-with col_v: view_mode = st.radio("Modalità File:", ["🖼️ Griglia (Anteprime)", "📝 Lista (Veloce)"], horizontal=True)
-with col_s: sort_mode = st.selectbox("Ordina File per:", ["Nome (A-Z)", "Nome (Z-A)", "Più recenti", "Dimensione"])
-with col_pag: items_per_page = st.selectbox("File per pagina:", [10, 25, 50, 100], index=0)
+with col_v: st.radio("Modalità File:", ["🖼️ Griglia (Anteprime)", "📝 Lista (Veloce)"], horizontal=True, key="vmode", on_change=save_settings)
+with col_s: st.selectbox("Ordina File per:", ["Nome (A-Z)", "Nome (Z-A)", "Più recenti", "Dimensione"], key="smode", on_change=save_settings)
+with col_pag: st.selectbox("File per pagina:", [10, 25, 50, 100], key="ipp", on_change=save_settings)
 
 st.divider()
 
@@ -174,10 +212,10 @@ if folders and search_scope == "Locale (Solo questa cartella)":
     filtered_folders = []
     for f in folders:
         f_name = os.path.basename(f.strip('/'))
-        if hide_dot_files and f_name.startswith('.'): continue
+        if st.session_state.hide_dot and f_name.startswith('.'): continue
         if is_match(f_name, search_query, search_mode): filtered_folders.append(f)
 
-    if folder_view_mode == "📁 Griglia (Affiancate)":
+    if st.session_state.folder_view == "📁 Griglia (Affiancate)":
         cols = st.columns(4)
         for i, folder in enumerate(filtered_folders):
             folder_name = folder.replace(st.session_state.current_path, "").strip("/")
@@ -198,13 +236,13 @@ if files:
     filtered_files = []
     for f in files:
         f_name = os.path.basename(f['Key'])
-        if hide_dot_files and f_name.startswith('.'): continue
+        if st.session_state.hide_dot and f_name.startswith('.'): continue
         if is_match(f_name, search_query, search_mode): filtered_files.append(f)
     
-    if sort_mode == "Nome (A-Z)": filtered_files.sort(key=lambda x: os.path.basename(x['Key']).lower())
-    elif sort_mode == "Nome (Z-A)": filtered_files.sort(key=lambda x: os.path.basename(x['Key']).lower(), reverse=True)
-    elif sort_mode == "Più recenti": filtered_files.sort(key=lambda x: x['LastModified'], reverse=True)
-    elif sort_mode == "Dimensione": filtered_files.sort(key=lambda x: x['Size'], reverse=True)
+    if st.session_state.smode == "Nome (A-Z)": filtered_files.sort(key=lambda x: os.path.basename(x['Key']).lower())
+    elif st.session_state.smode == "Nome (Z-A)": filtered_files.sort(key=lambda x: os.path.basename(x['Key']).lower(), reverse=True)
+    elif st.session_state.smode == "Più recenti": filtered_files.sort(key=lambda x: x['LastModified'], reverse=True)
+    elif st.session_state.smode == "Dimensione": filtered_files.sort(key=lambda x: x['Size'], reverse=True)
 
     if st.session_state.selected_files:
         st.success(f"Hai selezionato {len(st.session_state.selected_files)} file.")
@@ -216,10 +254,10 @@ if files:
     total_files = len(filtered_files)
     if total_files == 0: st.warning("Nessun file trovato.")
     else:
-        total_pages = math.ceil(total_files / items_per_page)
+        total_pages = math.ceil(total_files / st.session_state.ipp)
         if st.session_state.page >= total_pages: st.session_state.page = max(0, total_pages - 1)
         
-        if total_files > items_per_page:
+        if total_files > st.session_state.ipp:
             pag_col1, pag_col2, pag_col3 = st.columns([1, 2, 1])
             with pag_col1:
                 if st.button("⬅️ Precedente", disabled=(st.session_state.page == 0)): st.session_state.page -= 1; st.rerun()
@@ -227,56 +265,60 @@ if files:
             with pag_col3:
                 if st.button("Avanti ➡️", disabled=(st.session_state.page >= total_pages - 1)): st.session_state.page += 1; st.rerun()
 
-        start_idx = st.session_state.page * items_per_page
-        paginated_files = filtered_files[start_idx : start_idx + items_per_page]
+        start_idx = st.session_state.page * st.session_state.ipp
+        paginated_files = filtered_files[start_idx : start_idx + st.session_state.ipp]
 
-        # --- VISTA GRIGLIA FILE ---
-        if view_mode == "🖼️ Griglia (Anteprime)":
+        # --- VISTA GRIGLIA FILE (CORRETTA A RIGHE REGOLARI) ---
+        if st.session_state.vmode == "🖼️ Griglia (Anteprime)":
             col_count_map = {"Molto Grande": 2, "Grande": 3, "Media (Default)": 4, "Piccola": 6, "Piccolissima": 8}
-            num_cols = col_count_map[thumb_size]
-            cols = st.columns(num_cols)
+            num_cols = col_count_map[st.session_state.tsize]
             
-            for i, file_obj in enumerate(paginated_files):
-                file_key = file_obj['Key']
-                file_name = os.path.basename(file_key)
+            # NOVITÀ: Creiamo blocchi riga per riga invece di impilare tutto verticalmente
+            for row_idx in range(0, len(paginated_files), num_cols):
+                cols = st.columns(num_cols)
+                row_files = paginated_files[row_idx : row_idx + num_cols]
                 
-                with cols[i % num_cols]:
-                    with st.container(border=True):
-                        display_name = f"📂 {os.path.dirname(file_key)}/\n{file_name}" if search_scope == "Globale (Cerca in tutto il bucket)" else file_name
-                        if thumb_size in ["Piccola", "Piccolissima"] and len(display_name) > 25: display_name = display_name[:22] + "..."
+                for i, file_obj in enumerate(row_files):
+                    file_key = file_obj['Key']
+                    file_name = os.path.basename(file_key)
+                    
+                    with cols[i]:
+                        with st.container(border=True):
+                            display_name = f"📂 {os.path.dirname(file_key)}/\n{file_name}" if search_scope == "Globale (Cerca in tutto il bucket)" else file_name
+                            if st.session_state.tsize in ["Piccola", "Piccolissima"] and len(display_name) > 25: 
+                                display_name = display_name[:22] + "..."
+                                
+                            is_selected = file_key in st.session_state.selected_files
+                            if st.checkbox(f"{display_name}", value=is_selected, key=f"chk_{file_key}"): st.session_state.selected_files.add(file_key)
+                            else: st.session_state.selected_files.discard(file_key)
                             
-                        is_selected = file_key in st.session_state.selected_files
-                        if st.checkbox(f"{display_name}", value=is_selected, key=f"chk_{file_key}"): st.session_state.selected_files.add(file_key)
-                        else: st.session_state.selected_files.discard(file_key)
-                        
-                        st.caption(f"{(file_obj['Size'] / 1048576):.2f} MB")
-                        url = get_presigned_url(file_key)
-                        
-                        # FIX PER I FILE SENZA ESTENSIONE
-                        ext = file_name.split('.')[-1].lower() if '.' in file_name else ''
-                        
-                        if ext in ['jpg', 'jpeg', 'png', 'gif', 'webp']: 
-                            st.image(url, use_container_width=True)
-                        # Tratta come video se ha l'estensione giusta OPPURE se non ha nessuna estensione (ext == '')
-                        elif ext in ['mp4', 'mov', 'webm', 'avi', 'mkv'] or ext == '': 
-                            thumb_url = get_thumbnail_url(file_key)
-                            if not thumb_url:
-                                with st.spinner("📸 Creazione..."):
-                                    if generate_and_upload_thumbnail(file_key):
-                                        thumb_url = get_presigned_url(get_ts_thumbnail_key(file_key))
+                            st.caption(f"{(file_obj['Size'] / 1048576):.2f} MB")
+                            url = get_presigned_url(file_key)
                             
-                            if thumb_url:
-                                st.image(thumb_url, use_container_width=True)
-                                with st.expander("▶️ Play"): st.video(url)
-                            else:
-                                st.warning("Anteprima Fallita.")
-                                with st.expander("▶️ Play"): st.video(url)
-                        else: st.write("*(Nessuna anteprima)*")
+                            ext = file_name.split('.')[-1].lower() if '.' in file_name else ''
                             
-                        st.markdown(f"[⬇️ Scarica Singolo]({url})")
+                            if ext in ['jpg', 'jpeg', 'png', 'gif', 'webp']: 
+                                st.image(url, use_container_width=True)
+                            elif ext in ['mp4', 'mov', 'webm', 'avi', 'mkv'] or ext == '': 
+                                thumb_url = get_thumbnail_url(file_key)
+                                if not thumb_url:
+                                    with st.spinner("📸 Creazione..."):
+                                        if generate_and_upload_thumbnail(file_key):
+                                            thumb_url = get_presigned_url(get_ts_thumbnail_key(file_key))
+                                
+                                if thumb_url:
+                                    st.image(thumb_url, use_container_width=True)
+                                    # NOVITÀ: Forza il riconoscimento come video MP4 al browser
+                                    with st.expander("▶️ Play"): st.video(url, format="video/mp4")
+                                else:
+                                    st.warning("Anteprima Fallita.")
+                                    with st.expander("▶️ Play"): st.video(url, format="video/mp4")
+                            else: st.write("*(Nessuna anteprima)*")
+                                
+                            st.markdown(f"[⬇️ Scarica Singolo]({url})")
 
         # --- VISTA LISTA FILE ---
-        elif view_mode == "📝 Lista (Veloce)":
+        elif st.session_state.vmode == "📝 Lista (Veloce)":
             file_data = []
             for f in paginated_files:
                 file_data.append({
