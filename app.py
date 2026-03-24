@@ -1,13 +1,12 @@
 import streamlit as st
 import boto3
 import os
+import pandas as pd
 from botocore.exceptions import ClientError
 
-# --- CONFIGURAZIONE PAGINA ---
 st.set_page_config(page_title="Wasabi Cloud Explorer", layout="wide")
 st.title("🗂️ Wasabi Cloud Explorer")
 
-# --- INIZIALIZZAZIONE CLIENT WASABI (S3 compatibile) ---
 @st.cache_resource
 def get_s3_client():
     return boto3.client(
@@ -21,98 +20,98 @@ def get_s3_client():
 s3 = get_s3_client()
 BUCKET_NAME = st.secrets["wasabi"]["BUCKET_NAME"]
 
-# --- GESTIONE STATO DI NAVIGAZIONE ---
 if "current_path" not in st.session_state:
     st.session_state.current_path = ""
 
 def change_dir(new_path):
     st.session_state.current_path = new_path
 
-# --- FUNZIONI DI SUPPORTO ---
 def list_s3_objects(prefix):
-    """Recupera cartelle (CommonPrefixes) e file (Contents) dal bucket."""
+    # Nota: list_objects_v2 restituisce max 1000 elementi alla volta.
     response = s3.list_objects_v2(Bucket=BUCKET_NAME, Prefix=prefix, Delimiter='/')
-    
     folders = [p['Prefix'] for p in response.get('CommonPrefixes', [])]
-    # Filtra i file escludendo la 'cartella' stessa se appare come oggetto
     files = [c for c in response.get('Contents', []) if c['Key'] != prefix]
-    
     return folders, files
 
-def get_presigned_url(file_key):
-    """Genera un URL temporaneo per visualizzare immagini/video in modo sicuro."""
+def get_presigned_url(file_key, expires_in=3600):
     try:
-        url = s3.generate_presigned_url('get_object',
+        return s3.generate_presigned_url('get_object',
                                         Params={'Bucket': BUCKET_NAME, 'Key': file_key},
-                                        ExpiresIn=3600) # Scade in 1 ora
-        return url
+                                        ExpiresIn=expires_in)
     except ClientError as e:
-        st.error(f"Errore nella generazione dell'URL: {e}")
         return None
 
-# --- UI DI NAVIGAZIONE ---
-col1, col2 = st.columns([1, 4])
+# --- UI DI NAVIGAZIONE E RICERCA ---
+col1, col2, col3 = st.columns([1, 3, 2])
 with col1:
-    if st.button("🏠 Home (Radice)"):
+    if st.button("🏠 Home"):
         change_dir("")
-
 with col2:
-    st.write(f"**Percorso attuale:** `/{st.session_state.current_path}`")
+    st.write(f"**Percorso:** `/{st.session_state.current_path}`")
+with col3:
+    search_query = st.text_input("🔍 Cerca file qui...", "")
 
 st.divider()
 
-# --- RECUPERO E VISUALIZZAZIONE CONTENUTI ---
-folders, files = list_s3_objects(st.session_state.current_path)
+# --- RECUPERO CONTENUTI ---
+with st.spinner("Caricamento in corso..."):
+    folders, files = list_s3_objects(st.session_state.current_path)
 
-# Mostra le Cartelle
+# --- MOSTRA CARTELLE ---
 if folders:
     st.subheader("📁 Cartelle")
     cols = st.columns(4)
     for i, folder in enumerate(folders):
         folder_name = folder.replace(st.session_state.current_path, "").strip("/")
-        with cols[i % 4]:
-            if st.button(f"📂 {folder_name}", key=folder):
-                change_dir(folder)
-                st.rerun()
+        # Filtra anche le cartelle se c'è una ricerca
+        if search_query.lower() in folder_name.lower() or search_query == "":
+            with cols[i % 4]:
+                if st.button(f"📂 {folder_name}", key=folder):
+                    change_dir(folder)
+                    st.rerun()
 
-# Mostra i File (Immagini e Video)
+# --- MOSTRA FILE (TRAMITE TABELLA PANDAS) ---
 if files:
-    st.subheader("📄 File (Immagini e Video)")
+    st.subheader("📄 File")
     
-    # Crea una griglia per i file
-    cols = st.columns(3)
-    for i, file_obj in enumerate(files):
+    # Costruiamo i dati per la tabella
+    file_data = []
+    for file_obj in files:
         file_key = file_obj['Key']
         file_name = os.path.basename(file_key)
-        file_size_mb = file_obj['Size'] / (1024 * 1024)
         
-        with cols[i % 3]:
-            with st.container(border=True):
-                st.write(f"**{file_name}** ({file_size_mb:.2f} MB)")
-                
-                url = get_presigned_url(file_key)
-                
-                if url:
-                    # Riconosci il tipo di file dall'estensione
-                    ext = file_name.split('.')[-1].lower()
-                    if ext in ['jpg', 'jpeg', 'png', 'gif', 'webp']:
-                        st.image(url, use_container_width=True)
-                    elif ext in ['mp4', 'mov', 'avi', 'mkv']:
-                        st.video(url)
-                    else:
-                        st.write("*(Anteprima non disponibile per questo formato)*")
-                
-                # Bottone per il Download diretto scaricando l'oggetto in memoria
-                # Nota: per file enormi (es. video giganti), scaricarli tutti in memoria potrebbe rallentare l'app.
-                # Per file standard va benissimo.
-                file_data = s3.get_object(Bucket=BUCKET_NAME, Key=file_key)['Body'].read()
-                st.download_button(
-                    label="⬇️ Scarica",
-                    data=file_data,
-                    file_name=file_name,
-                    mime="application/octet-stream",
-                    key=f"dl_{file_key}"
-                )
+        # Applica il filtro di ricerca
+        if search_query.lower() in file_name.lower() or search_query == "":
+            file_size_mb = file_obj['Size'] / (1024 * 1024)
+            last_modified = file_obj['LastModified'].strftime("%Y-%m-%d %H:%M")
+            download_url = get_presigned_url(file_key)
+            
+            file_data.append({
+                "Nome File": file_name,
+                "Dimensione (MB)": round(file_size_mb, 2),
+                "Ultima Modifica": last_modified,
+                "Download": download_url,
+                "Key": file_key
+            })
+
+    if file_data:
+        df = pd.DataFrame(file_data)
+        
+        # Configuriamo la tabella interattiva di Streamlit
+        st.dataframe(
+            df,
+            column_config={
+                "Nome File": st.column_config.TextColumn("Nome File"),
+                "Dimensione (MB)": st.column_config.NumberColumn("MB", format="%.2f"),
+                "Ultima Modifica": st.column_config.DatetimeColumn("Modificato il"),
+                "Download": st.column_config.LinkColumn("Link", display_text="⬇️ Scarica"),
+                "Key": None, # Nascondiamo la colonna Key interna
+            },
+            hide_index=True,
+            use_container_width=True
+        )
+    elif search_query:
+        st.warning("Nessun file corrisponde alla tua ricerca.")
 
 if not folders and not files:
     st.info("La cartella è vuota.")
