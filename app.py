@@ -15,21 +15,31 @@ st.title("🗂️ Wasabi Cloud Explorer")
 
 # --- GESTIONE IMPOSTAZIONI (JSON) ---
 SETTINGS_FILE = "settings.json"
+VALID_SMODES = [
+    "Nome (A-Z)", "Nome (Z-A)", 
+    "Data (Più recenti prima)", "Data (Più vecchi prima)", 
+    "Dimensione (Maggiore prima)", "Dimensione (Minore prima)"
+]
 
 def load_settings():
-    if os.path.exists(SETTINGS_FILE):
-        try:
-            with open(SETTINGS_FILE, "r") as f:
-                return json.load(f)
-        except: pass
-    return {
+    settings = {
         "folder_view": "📁 Griglia (Affiancate)",
         "hide_dot": True,
         "tsize": "Media (Default)",
         "vmode": "🖼️ Griglia (Anteprime)",
-        "smode": "Nome (A-Z)",
+        "smode": "Data (Più recenti prima)",
         "ipp": 25
     }
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, "r") as f:
+                loaded = json.load(f)
+                # Sicurezza: se avevi salvato un vecchio parametro, usa il default
+                if loaded.get("smode") not in VALID_SMODES:
+                    loaded["smode"] = "Data (Più recenti prima)"
+                settings.update(loaded)
+        except: pass
+    return settings
 
 def save_settings():
     settings = {
@@ -43,7 +53,6 @@ def save_settings():
     with open(SETTINGS_FILE, "w") as f:
         json.dump(settings, f)
 
-# Inizializza le impostazioni nello stato di Streamlit
 if "settings_loaded" not in st.session_state:
     st.session_state.update(load_settings())
     st.session_state.settings_loaded = True
@@ -143,6 +152,22 @@ def generate_and_upload_thumbnail(file_key):
     except: pass
     return False
 
+# --- FUNZIONE RIUTILIZZABILE PER LA PAGINAZIONE ---
+def render_pagination_buttons(position_key, total_pages):
+    """Genera i bottoni di paginazione. position_key evita l'errore DuplicateWidgetID"""
+    if total_pages > 1:
+        pag_col1, pag_col2, pag_col3 = st.columns([1, 2, 1])
+        with pag_col1:
+            if st.button("⬅️ Precedente", disabled=(st.session_state.page == 0), key=f"prev_{position_key}"): 
+                st.session_state.page -= 1
+                st.rerun()
+        with pag_col2: 
+            st.markdown(f"<div style='text-align: center'>Pagina <b>{st.session_state.page + 1}</b> di {total_pages}</div>", unsafe_allow_html=True)
+        with pag_col3:
+            if st.button("Avanti ➡️", disabled=(st.session_state.page >= total_pages - 1), key=f"next_{position_key}"): 
+                st.session_state.page += 1
+                st.rerun()
+
 # --- UI BARRA SUPERIORE ---
 col1, col2, col3 = st.columns([1, 2, 2])
 with col1:
@@ -197,9 +222,12 @@ if st.session_state.batch_gen:
 st.divider()
 
 col_v, col_s, col_pag = st.columns([2, 1, 1])
-with col_v: st.radio("Modalità File:", ["🖼️ Griglia (Anteprime)", "📝 Lista (Veloce)"], horizontal=True, key="vmode", on_change=save_settings)
-with col_s: st.selectbox("Ordina File per:", ["Nome (A-Z)", "Nome (Z-A)", "Più recenti", "Dimensione"], key="smode", on_change=save_settings)
-with col_pag: st.selectbox("File per pagina:", [10, 25, 50, 100], key="ipp", on_change=save_settings)
+with col_v: 
+    st.radio("Modalità File:", ["🖼️ Griglia (Anteprime)", "📝 Lista (Veloce)"], horizontal=True, key="vmode", on_change=save_settings)
+with col_s: 
+    st.selectbox("Ordina File per:", VALID_SMODES, key="smode", on_change=save_settings)
+with col_pag: 
+    st.selectbox("File per pagina:", [10, 25, 50, 100], key="ipp", on_change=save_settings)
 
 st.divider()
 
@@ -220,13 +248,13 @@ if folders and search_scope == "Locale (Solo questa cartella)":
         for i, folder in enumerate(filtered_folders):
             folder_name = folder.replace(st.session_state.current_path, "").strip("/")
             with cols[i % 4]:
-                if st.button(f"📂 {folder_name}", key=folder, use_container_width=True):
+                if st.button(f"📂 {folder_name}", key=f"dir_{folder}", use_container_width=True):
                     change_dir(folder)
                     st.rerun()
     else:
         for folder in filtered_folders:
             folder_name = folder.replace(st.session_state.current_path, "").strip("/")
-            if st.button(f"📂 {folder_name}", key=folder):
+            if st.button(f"📂 {folder_name}", key=f"dir_{folder}"):
                 change_dir(folder)
                 st.rerun()
 
@@ -239,41 +267,39 @@ if files:
         if st.session_state.hide_dot and f_name.startswith('.'): continue
         if is_match(f_name, search_query, search_mode): filtered_files.append(f)
     
+    # NUOVA LOGICA DI ORDINAMENTO BIDIREZIONALE
     if st.session_state.smode == "Nome (A-Z)": filtered_files.sort(key=lambda x: os.path.basename(x['Key']).lower())
     elif st.session_state.smode == "Nome (Z-A)": filtered_files.sort(key=lambda x: os.path.basename(x['Key']).lower(), reverse=True)
-    elif st.session_state.smode == "Più recenti": filtered_files.sort(key=lambda x: x['LastModified'], reverse=True)
-    elif st.session_state.smode == "Dimensione": filtered_files.sort(key=lambda x: x['Size'], reverse=True)
+    elif st.session_state.smode == "Data (Più recenti prima)": filtered_files.sort(key=lambda x: x['LastModified'], reverse=True)
+    elif st.session_state.smode == "Data (Più vecchi prima)": filtered_files.sort(key=lambda x: x['LastModified'])
+    elif st.session_state.smode == "Dimensione (Maggiore prima)": filtered_files.sort(key=lambda x: x['Size'], reverse=True)
+    elif st.session_state.smode == "Dimensione (Minore prima)": filtered_files.sort(key=lambda x: x['Size'])
 
     if st.session_state.selected_files:
         st.success(f"Hai selezionato {len(st.session_state.selected_files)} file.")
-        if st.button("📦 Scarica Selezionati (ZIP Veloce)"):
+        if st.button("📦 Scarica Selezionati (ZIP Veloce)", key="zip_top"):
             with st.spinner("Creazione ZIP in corso..."):
                 zip_data = create_uncompressed_zip(st.session_state.selected_files)
                 st.download_button("⬇️ Salva ZIP", data=zip_data, file_name="wasabi_download.zip", mime="application/zip")
 
     total_files = len(filtered_files)
-    if total_files == 0: st.warning("Nessun file trovato.")
+    if total_files == 0: 
+        st.warning("Nessun file trovato.")
     else:
         total_pages = math.ceil(total_files / st.session_state.ipp)
         if st.session_state.page >= total_pages: st.session_state.page = max(0, total_pages - 1)
         
-        if total_files > st.session_state.ipp:
-            pag_col1, pag_col2, pag_col3 = st.columns([1, 2, 1])
-            with pag_col1:
-                if st.button("⬅️ Precedente", disabled=(st.session_state.page == 0)): st.session_state.page -= 1; st.rerun()
-            with pag_col2: st.markdown(f"<div style='text-align: center'>Pagina <b>{st.session_state.page + 1}</b> di {total_pages}</div>", unsafe_allow_html=True)
-            with pag_col3:
-                if st.button("Avanti ➡️", disabled=(st.session_state.page >= total_pages - 1)): st.session_state.page += 1; st.rerun()
+        # Paginazione in ALTO (chiave 'top')
+        render_pagination_buttons("top", total_pages)
 
         start_idx = st.session_state.page * st.session_state.ipp
         paginated_files = filtered_files[start_idx : start_idx + st.session_state.ipp]
 
-        # --- VISTA GRIGLIA FILE (CORRETTA A RIGHE REGOLARI) ---
+        # --- VISTA GRIGLIA FILE ---
         if st.session_state.vmode == "🖼️ Griglia (Anteprime)":
             col_count_map = {"Molto Grande": 2, "Grande": 3, "Media (Default)": 4, "Piccola": 6, "Piccolissima": 8}
             num_cols = col_count_map[st.session_state.tsize]
             
-            # NOVITÀ: Creiamo blocchi riga per riga invece di impilare tutto verticalmente
             for row_idx in range(0, len(paginated_files), num_cols):
                 cols = st.columns(num_cols)
                 row_files = paginated_files[row_idx : row_idx + num_cols]
@@ -308,7 +334,6 @@ if files:
                                 
                                 if thumb_url:
                                     st.image(thumb_url, use_container_width=True)
-                                    # NOVITÀ: Forza il riconoscimento come video MP4 al browser
                                     with st.expander("▶️ Play"): st.video(url, format="video/mp4")
                                 else:
                                     st.warning("Anteprima Fallita.")
@@ -341,5 +366,9 @@ if files:
                     key = row["_key_hidden"]
                     if row["☑️ Seleziona"]: st.session_state.selected_files.add(key)
                     else: st.session_state.selected_files.discard(key)
+
+        # Paginazione in BASSO (chiave 'bottom')
+        st.write("") # Spazio per staccare un po'
+        render_pagination_buttons("bottom", total_pages)
 
 if not folders and not files: st.info("Nessun contenuto in questa cartella.")
