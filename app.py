@@ -13,7 +13,7 @@ from botocore.exceptions import ClientError
 st.set_page_config(page_title="Wasabi Cloud Explorer", layout="wide")
 st.title("🗂️ Wasabi Cloud Explorer")
 
-# --- GESTIONE IMPOSTAZIONI E STATO ---
+# --- GESTIONE IMPOSTAZIONI (JSON) ---
 SETTINGS_FILE = "settings.json"
 VALID_SMODES = [
     "Nome (A-Z)", "Nome (Z-A)", 
@@ -28,13 +28,13 @@ def load_settings():
         "tsize": "Media (Default)",
         "vmode": "🖼️ Griglia (Anteprime)",
         "smode": "Data (Più recenti prima)",
-        "ipp": 25,
-        "max_results": 500
+        "ipp": 25
     }
     if os.path.exists(SETTINGS_FILE):
         try:
             with open(SETTINGS_FILE, "r") as f:
                 loaded = json.load(f)
+                # Sicurezza: se avevi salvato un vecchio parametro, usa il default
                 if loaded.get("smode") not in VALID_SMODES:
                     loaded["smode"] = "Data (Più recenti prima)"
                 settings.update(loaded)
@@ -48,8 +48,7 @@ def save_settings():
         "tsize": st.session_state.tsize,
         "vmode": st.session_state.vmode,
         "smode": st.session_state.smode,
-        "ipp": st.session_state.ipp,
-        "max_results": st.session_state.max_results
+        "ipp": st.session_state.ipp
     }
     with open(SETTINGS_FILE, "w") as f:
         json.dump(settings, f)
@@ -84,15 +83,7 @@ def change_dir(new_path):
 def is_valid_s3_item(key, prefix):
     return key != prefix and '/.ts/' not in key and not key.startswith('.ts/')
 
-def is_match(filename, query, mode):
-    if not query: return True
-    q, f = query.lower(), filename.lower()
-    if mode == "🧠 Smart (Parole libere)": return all(word in f for word in q.split())
-    elif mode == "✨ Fuzzy (Tollera errori)": return fuzz.token_set_ratio(q, f) >= 70
-    else: return q in f
-
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_s3_data_cached(prefix, query, scope, max_res, search_mode):
+def get_s3_items(prefix, query, scope):
     folders = []
     files = []
     paginator = s3.get_paginator('list_objects_v2')
@@ -102,10 +93,7 @@ def fetch_s3_data_cached(prefix, query, scope, max_res, search_mode):
         for page in pages:
             for c in page.get('Contents', []):
                 if not c['Key'].endswith('/') and is_valid_s3_item(c['Key'], prefix):
-                    if is_match(os.path.basename(c['Key']), query, search_mode):
-                        files.append(c)
-                        if max_res != "Nessun limite" and len(files) >= int(max_res):
-                            return folders, files
+                    files.append(c)
     else:
         pages = paginator.paginate(Bucket=BUCKET_NAME, Prefix=prefix, Delimiter='/')
         for page in pages:
@@ -117,6 +105,13 @@ def fetch_s3_data_cached(prefix, query, scope, max_res, search_mode):
                     files.append(c)
         
     return folders, files
+
+def is_match(filename, query, mode):
+    if not query: return True
+    q, f = query.lower(), filename.lower()
+    if mode == "🧠 Smart (Parole libere)": return all(word in f for word in q.split())
+    elif mode == "✨ Fuzzy (Tollera errori)": return fuzz.token_set_ratio(q, f) >= 70
+    else: return q in f
 
 def get_presigned_url(file_key, expires_in=3600):
     try: return s3.generate_presigned_url('get_object', Params={'Bucket': BUCKET_NAME, 'Key': file_key}, ExpiresIn=expires_in)
@@ -157,7 +152,9 @@ def generate_and_upload_thumbnail(file_key):
     except: pass
     return False
 
+# --- FUNZIONE RIUTILIZZABILE PER LA PAGINAZIONE ---
 def render_pagination_buttons(position_key, total_pages):
+    """Genera i bottoni di paginazione. position_key evita l'errore DuplicateWidgetID"""
     if total_pages > 1:
         pag_col1, pag_col2, pag_col3 = st.columns([1, 2, 1])
         with pag_col1:
@@ -174,28 +171,24 @@ def render_pagination_buttons(position_key, total_pages):
 # --- UI BARRA SUPERIORE ---
 col1, col2, col3 = st.columns([1, 2, 2])
 with col1:
-    btn_col1, btn_col2 = st.columns(2)
-    with btn_col1:
-        if st.button("🏠 Home", use_container_width=True): change_dir("")
-    with btn_col2:
-        if st.button("🔄 Aggiorna", use_container_width=True): 
-            fetch_s3_data_cached.clear()
-            st.rerun()
+    if st.button("🏠 Home"): change_dir("")
 with col2:
     search_query = st.text_input("🔍 Cerca file e cartelle...", "")
     with st.expander("⚙️ Opzioni di Ricerca"):
         search_scope = st.radio("Raggio d'azione:", ["Locale (Solo questa cartella)", "Globale (Cerca in tutto il bucket)"], horizontal=True)
         search_mode = st.radio("Metodo:", ["🧠 Smart (Parole libere)", "✨ Fuzzy (Tollera errori)", "📏 Esatta"], horizontal=True)
-        st.selectbox("Ferma ricerca dopo aver trovato X file:", [100, 500, 1000, "Nessun limite"], key="max_results", on_change=save_settings)
 with col3:
     st.write(f"**Percorso:** `/{st.session_state.current_path}`")
 
 # --- UI OPZIONI DI VISUALIZZAZIONE ---
 with st.expander("👁️ Impostazioni Visualizzazione", expanded=False):
     c_v1, c_v2, c_v3 = st.columns(3)
-    with c_v1: st.radio("Vista Cartelle:", ["📁 Griglia (Affiancate)", "📝 Lista Compatta (Verticale)"], horizontal=True, key="folder_view", on_change=save_settings)
-    with c_v2: st.checkbox("🚫 Nascondi file/cartelle nascoste (es. '.pending')", key="hide_dot", on_change=save_settings)
-    with c_v3: st.selectbox("Dimensione Miniature:", ["Molto Grande", "Grande", "Media (Default)", "Piccola", "Piccolissima"], key="tsize", on_change=save_settings)
+    with c_v1: 
+        st.radio("Vista Cartelle:", ["📁 Griglia (Affiancate)", "📝 Lista Compatta (Verticale)"], horizontal=True, key="folder_view", on_change=save_settings)
+    with c_v2: 
+        st.checkbox("🚫 Nascondi file/cartelle nascoste (es. '.pending')", key="hide_dot", on_change=save_settings)
+    with c_v3: 
+        st.selectbox("Dimensione Miniature:", ["Molto Grande", "Grande", "Media (Default)", "Piccola", "Piccolissima"], key="tsize", on_change=save_settings)
 
 with st.expander("🛠️ Generazione Massiva Anteprime (Compatibile TagSpaces)"):
     st.write("Cerca video privi di anteprima e le genera salvandole nelle cartelle nascoste `.ts`.")
@@ -208,14 +201,13 @@ with st.expander("🛠️ Generazione Massiva Anteprime (Compatibile TagSpaces)"
 if st.session_state.batch_gen:
     mode = st.session_state.batch_gen
     st.session_state.batch_gen = None
-    with st.spinner("Scansione in corso..."):
-        fetch_s3_data_cached.clear()
-        _, files_to_check = fetch_s3_data_cached("" if mode == "global" else st.session_state.current_path, "", "Globale (Cerca in tutto il bucket)" if mode == "global" else "Locale", "Nessun limite", "📏 Esatta")
+    with st.spinner("Scansione database in corso..."):
+        _, files_to_check = get_s3_items("" if mode == "global" else st.session_state.current_path, "", "Globale (Cerca in tutto il bucket)" if mode == "global" else "Locale")
         videos = [f['Key'] for f in files_to_check if f['Key'].lower().endswith(('.mp4', '.mov', '.webm', '.avi', '.mkv')) or '.' not in os.path.basename(f['Key'])]
     
     if not videos: st.info("Nessun video trovato.")
     else:
-        st.write("Generazione in corso. Non chiudere...")
+        st.write("Generazione in corso. Non chiudere la pagina...")
         progress_bar = st.progress(0)
         status_text = st.empty()
         count = 0
@@ -224,20 +216,23 @@ if st.session_state.batch_gen:
                 status_text.text(f"Elaborazione: {os.path.basename(v_key)} ({i+1}/{len(videos)})")
                 if generate_and_upload_thumbnail(v_key): count += 1
             progress_bar.progress((i + 1) / len(videos))
-        status_text.text(f"Completato! {count} nuove anteprime generate.")
+        status_text.text(f"Completato! Generate {count} nuove anteprime su {len(videos)} video controllati.")
         st.success("Operazione conclusa con successo!")
 
 st.divider()
 
 col_v, col_s, col_pag = st.columns([2, 1, 1])
-with col_v: st.radio("Modalità File:", ["🖼️ Griglia (Anteprime)", "📝 Lista (Veloce)"], horizontal=True, key="vmode", on_change=save_settings)
-with col_s: st.selectbox("Ordina File per:", VALID_SMODES, key="smode", on_change=save_settings)
-with col_pag: st.selectbox("File per pagina:", [10, 25, 50, 100], key="ipp", on_change=save_settings)
+with col_v: 
+    st.radio("Modalità File:", ["🖼️ Griglia (Anteprime)", "📝 Lista (Veloce)"], horizontal=True, key="vmode", on_change=save_settings)
+with col_s: 
+    st.selectbox("Ordina File per:", VALID_SMODES, key="smode", on_change=save_settings)
+with col_pag: 
+    st.selectbox("File per pagina:", [10, 25, 50, 100], key="ipp", on_change=save_settings)
 
 st.divider()
 
-with st.spinner("Connessione a Wasabi in corso..."):
-    folders, files = fetch_s3_data_cached(st.session_state.current_path, search_query, search_scope, st.session_state.max_results, search_mode)
+with st.spinner("Caricamento..."):
+    folders, files = get_s3_items(st.session_state.current_path, search_query, search_scope)
 
 # --- FILTRO CARTELLE ---
 if folders and search_scope == "Locale (Solo questa cartella)":
@@ -263,7 +258,7 @@ if folders and search_scope == "Locale (Solo questa cartella)":
                 change_dir(folder)
                 st.rerun()
 
-# --- FILTRO FILE E DOWNLOAD MASSIVO ---
+# --- FILTRO FILE ---
 if files:
     st.subheader("📄 File")
     filtered_files = []
@@ -272,6 +267,7 @@ if files:
         if st.session_state.hide_dot and f_name.startswith('.'): continue
         if is_match(f_name, search_query, search_mode): filtered_files.append(f)
     
+    # NUOVA LOGICA DI ORDINAMENTO BIDIREZIONALE
     if st.session_state.smode == "Nome (A-Z)": filtered_files.sort(key=lambda x: os.path.basename(x['Key']).lower())
     elif st.session_state.smode == "Nome (Z-A)": filtered_files.sort(key=lambda x: os.path.basename(x['Key']).lower(), reverse=True)
     elif st.session_state.smode == "Data (Più recenti prima)": filtered_files.sort(key=lambda x: x['LastModified'], reverse=True)
@@ -279,36 +275,27 @@ if files:
     elif st.session_state.smode == "Dimensione (Maggiore prima)": filtered_files.sort(key=lambda x: x['Size'], reverse=True)
     elif st.session_state.smode == "Dimensione (Minore prima)": filtered_files.sort(key=lambda x: x['Size'])
 
-    # PANNELLO DI DOWNLOAD
     if st.session_state.selected_files:
-        c_down1, c_down2 = st.columns([3, 1])
-        with c_down1:
-            st.success(f"Hai selezionato {len(st.session_state.selected_files)} file pronti per il download.")
-            if st.button("📦 Scarica Selezionati (ZIP Veloce)", key="zip_top"):
-                with st.spinner("Creazione ZIP in corso..."):
-                    zip_data = create_uncompressed_zip(st.session_state.selected_files)
-                    st.download_button("⬇️ Salva ZIP nel PC", data=zip_data, file_name="wasabi_download.zip", mime="application/zip")
-        with c_down2:
-            st.write("") # Spazio per allineare
-            if st.button("🗑️ Svuota Selezione", use_container_width=True):
-                st.session_state.selected_files.clear()
-                # Pulisce i checkbox dalla memoria
-                for k in list(st.session_state.keys()):
-                    if k.startswith("chk_"): del st.session_state[k]
-                st.rerun()
+        st.success(f"Hai selezionato {len(st.session_state.selected_files)} file.")
+        if st.button("📦 Scarica Selezionati (ZIP Veloce)", key="zip_top"):
+            with st.spinner("Creazione ZIP in corso..."):
+                zip_data = create_uncompressed_zip(st.session_state.selected_files)
+                st.download_button("⬇️ Salva ZIP", data=zip_data, file_name="wasabi_download.zip", mime="application/zip")
 
     total_files = len(filtered_files)
     if total_files == 0: 
-        if search_query: st.warning("Nessun file corrisponde alla ricerca corrente.")
+        st.warning("Nessun file trovato.")
     else:
         total_pages = math.ceil(total_files / st.session_state.ipp)
         if st.session_state.page >= total_pages: st.session_state.page = max(0, total_pages - 1)
         
+        # Paginazione in ALTO (chiave 'top')
         render_pagination_buttons("top", total_pages)
+
         start_idx = st.session_state.page * st.session_state.ipp
         paginated_files = filtered_files[start_idx : start_idx + st.session_state.ipp]
 
-        # --- VISTA GRIGLIA FILE (CORRETTA) ---
+        # --- VISTA GRIGLIA FILE ---
         if st.session_state.vmode == "🖼️ Griglia (Anteprime)":
             col_count_map = {"Molto Grande": 2, "Grande": 3, "Media (Default)": 4, "Piccola": 6, "Piccolissima": 8}
             num_cols = col_count_map[st.session_state.tsize]
@@ -327,16 +314,9 @@ if files:
                             if st.session_state.tsize in ["Piccola", "Piccolissima"] and len(display_name) > 25: 
                                 display_name = display_name[:22] + "..."
                                 
-                            # FIX DEFINITIVO: Il checkbox usa la chiave senza imporre il value.
-                            chk_key = f"chk_{file_key}"
-                            if chk_key not in st.session_state:
-                                st.session_state[chk_key] = (file_key in st.session_state.selected_files)
-                                
-                            st.checkbox(f"{display_name}", key=chk_key)
-                            
-                            # Aggiorna il set globale se la spunta cambia
-                            if st.session_state[chk_key]: st.session_state.selected_files.add(file_key)
-                            elif file_key in st.session_state.selected_files: st.session_state.selected_files.remove(file_key)
+                            is_selected = file_key in st.session_state.selected_files
+                            if st.checkbox(f"{display_name}", value=is_selected, key=f"chk_{file_key}"): st.session_state.selected_files.add(file_key)
+                            else: st.session_state.selected_files.discard(file_key)
                             
                             st.caption(f"{(file_obj['Size'] / 1048576):.2f} MB")
                             url = get_presigned_url(file_key)
@@ -387,8 +367,8 @@ if files:
                     if row["☑️ Seleziona"]: st.session_state.selected_files.add(key)
                     else: st.session_state.selected_files.discard(key)
 
-        st.write("") 
+        # Paginazione in BASSO (chiave 'bottom')
+        st.write("") # Spazio per staccare un po'
         render_pagination_buttons("bottom", total_pages)
 
-if not folders and not files: 
-    if not search_query: st.info("Nessun contenuto in questa cartella.")
+if not folders and not files: st.info("Nessun contenuto in questa cartella.")
